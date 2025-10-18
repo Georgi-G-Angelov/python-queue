@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from app.config import NodeConfig, load_config_from_env, build_config
 from app.gossip import MembershipManager, gossip_loop
 from app.routes import register_routes
+from app.messaging.storage import QueueStorage
 import os
 import asyncio
 
@@ -34,6 +35,8 @@ def create_app(config: NodeConfig | None = None) -> FastAPI:
 
     app = FastAPI(title="python-queue", version="0.1.0", lifespan=lifespan)
     app.state.config = config
+    # Initialize storage singleton for this node
+    QueueStorage(config.node_id)
     # Determine self URL (priority: env var set by run_server.py, else http://127.0.0.1:port assumed later)
     self_url = os.getenv("QUEUE_SELF_URL", "http://127.0.0.1:8000")
     app.state.membership = MembershipManager(self_url, seeds=config.peers)
