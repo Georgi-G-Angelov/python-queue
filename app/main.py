@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from fastapi import FastAPI
+from datetime import datetime, UTC
+from contextlib import asynccontextmanager
 from app.config import NodeConfig, load_config_from_env, build_config
 from app.gossip import MembershipManager, DEFAULT_GOSSIP_INTERVAL, DEFAULT_PRUNE_AGE
 import os
@@ -14,18 +16,32 @@ def create_app(config: NodeConfig | None = None) -> FastAPI:
     The config is stored in ``app.state`` so endpoints can access it.
     If no config is provided, defaults are used (node_id=0, peers=[]).
     """
-
     if config is None:
         config = NodeConfig(node_id=0, peers=[])
 
-    app = FastAPI(title="python-queue", version="0.1.0")
+    # Lifespan context handles startup/shutdown of background tasks
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Start background gossip task
+        app.state.gossip_task = asyncio.create_task(_gossip_loop())
+        try:
+            yield
+        finally:
+            task: asyncio.Task = app.state.gossip_task
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    app = FastAPI(title="python-queue", version="0.1.0", lifespan=lifespan)
     app.state.config = config
     # Determine self URL (priority: env var set by run_server.py, else http://127.0.0.1:port assumed later)
     self_url = os.getenv("QUEUE_SELF_URL", "http://127.0.0.1:8000")
     app.state.membership = MembershipManager(self_url, seeds=config.peers)
 
     @app.get("/health", tags=["system"])  # Simple health/hello endpoint
-    async def health() -> dict[str, str]:  # noqa: D401 - short description fine
+    async def health() -> dict[str, str]:
         """Return a basic health payload."""
         return {"status": "ok", "message": "hello world"}
 
@@ -53,9 +69,8 @@ def create_app(config: NodeConfig | None = None) -> FastAPI:
     @app.get("/cluster/members", tags=["cluster"])
     async def cluster_members() -> dict[str, object]:
         membership: MembershipManager = app.state.membership
-        # Convert epoch seconds to ISO 8601 strings for readability
         snapshot = membership.snapshot()
-        iso_map = {u: __import__("datetime").datetime.utcfromtimestamp(ts).isoformat() + "Z" for u, ts in snapshot.items()}
+        iso_map = {u: datetime.fromtimestamp(ts, UTC).isoformat().replace('+00:00', 'Z') for u, ts in snapshot.items()}
         return {"members": membership.members(), "last_seen": iso_map}
 
     @app.post("/cluster/gossip", tags=["cluster"])
@@ -96,26 +111,11 @@ def create_app(config: NodeConfig | None = None) -> FastAPI:
                         pass
                 await asyncio.sleep(interval)
 
-    @app.on_event("startup")
-    async def on_startup() -> None:
-        # Start background gossip task
-        app.state.gossip_task = asyncio.create_task(_gossip_loop())
-
-    @app.on_event("shutdown")
-    async def on_shutdown() -> None:
-        task: asyncio.Task = app.state.gossip_task
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
     return app
 
 
 def create_app_from_env() -> FastAPI:
     return create_app(load_config_from_env())
-
 
 # Default app instance for ASGI auto-discovery (uvicorn app.main:app)
 app = create_app()
