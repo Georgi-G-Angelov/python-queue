@@ -3,7 +3,8 @@ from __future__ import annotations
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Set
+from typing import Dict, Iterable, List, Optional, Sequence
+import math
 
 
 @dataclass
@@ -22,44 +23,93 @@ class MembershipManager:
     a set of member URLs; receivers merge the set updating last_seen.
     """
 
-    def __init__(self, self_url: str):
+    def __init__(self, self_url: str, seeds: Optional[Sequence[str]] = None):
+        """Create a membership manager.
+
+        seeds: initial bootstrap peer URLs. They are kept even if not yet
+        observed via gossip so we can still attempt them if original peers die.
+        """
         self.self_url = self_url.rstrip('/')
         self._members: Dict[str, Member] = {self.self_url: Member(self.self_url)}
+        self._seeds: List[str] = []
+        self._initial_gossip_done = False
+        if seeds:
+            for s in seeds:
+                s_norm = s.rstrip('/')
+                if s_norm != self.self_url:
+                    self._seeds.append(s_norm)
+                    # Also list seeds as members immediately so APIs show them
+                    if s_norm not in self._members:
+                        self._members[s_norm] = Member(s_norm)
 
     def members(self) -> List[str]:
         return list(self._members.keys())
 
-    def add_or_touch(self, url: str) -> None:
-        url = url.rstrip('/')
-        if url in self._members:
-            self._members[url].touch()
-        else:
-            self._members[url] = Member(url)
+    def apply_snapshot(self, snapshot: Dict[str, float], sender: Optional[str]) -> None:
+        """Merge an incoming membership snapshot.
 
-    def merge(self, urls: Iterable[str]) -> None:
-        for u in urls:
-            self.add_or_touch(u)
+        For each entry: if we don't know the member, add it with that timestamp.
+        If we do, update only if the incoming timestamp is newer.
+        The sender (if provided) is touched to current time to represent
+        confirmation of liveness (regardless of provided timestamp).
+        """
+        now = time.time()
+        for url, ts in snapshot.items():
+            url_norm = url.rstrip('/')
+            existing = self._members.get(url_norm)
+            if existing is None:
+                # use provided timestamp; do not overwrite with now
+                self._members[url_norm] = Member(url_norm)
+                self._members[url_norm].last_seen = ts
+            else:
+                if ts > existing.last_seen:
+                    existing.last_seen = ts
+                
+                if existing.url == self.self_url:
+                    existing.last_seen = now
+        
+        if sender:
+            sender_norm = sender.rstrip('/')
+            if sender_norm in self._members:
+                self._members[sender_norm].last_seen = now
+            else:
+                self._members[sender_norm] = Member(sender_norm)
+                self._members[sender_norm].last_seen = now
+
+    def candidate_peers(self) -> List[str]:
+        """Return list of candidate peers (seeds + members excluding self)."""
+        return list(set(self._seeds) | {u for u in self._members if u != self.self_url})
 
     def pick_peer(self) -> Optional[str]:
-        # Choose a random peer excluding self
-        peers = [u for u in self._members if u != self.self_url]
-        if not peers:
+        """Choose a random peer.
+
+        First call: restrict to seeds (bootstrap). After successful selection
+        mark initial pass done. Subsequent calls: use union of seeds and members.
+        """
+        if not self._initial_gossip_done and self._seeds:
+            candidates = set(self._seeds)
+        else:
+            candidates = {u for u in self._members if u != self.self_url}
+        if not candidates:
             return None
-        return random.choice(peers)
+        choice = random.choice(list(candidates))
+        if not self._initial_gossip_done:
+            self._initial_gossip_done = True
+        return choice
 
     def snapshot(self) -> Dict[str, float]:
         return {u: m.last_seen for u, m in self._members.items()}
 
     def prune(self, max_age: float) -> None:
         cutoff = time.time() - max_age
-        # Keep self even if old
         for u in list(self._members.keys()):
             if u == self.self_url:
+                self._members[u].last_seen = time.time()
                 continue
             if self._members[u].last_seen < cutoff:
                 del self._members[u]
 
 
 # Simple policy constants
-DEFAULT_GOSSIP_INTERVAL = 10.0  # seconds
-DEFAULT_PRUNE_AGE = 60.0  # seconds
+DEFAULT_GOSSIP_INTERVAL = 2.0  # seconds
+DEFAULT_PRUNE_AGE = 20.0  # seconds

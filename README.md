@@ -78,7 +78,7 @@ Background loop (default every 2s):
 3. Receiver merges the list, updating `last_seen`.
 
 Endpoints:
-- `GET /cluster/members` -> `{ "members": [ ... ] }`
+- `GET /cluster/members` -> `{ "members": [ ... ], "last_seen": { "http://host:port": "2025-10-18T12:34:56.123456Z" } }`
 - `POST /cluster/gossip` body `{ "members": ["http://host:port", ...] }` returns `{ "known": [...] }`
 - `GET /cluster/info` now includes `members` array.
 

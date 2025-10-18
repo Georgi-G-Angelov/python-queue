@@ -22,10 +22,7 @@ def create_app(config: NodeConfig | None = None) -> FastAPI:
     app.state.config = config
     # Determine self URL (priority: env var set by run_server.py, else http://127.0.0.1:port assumed later)
     self_url = os.getenv("QUEUE_SELF_URL", "http://127.0.0.1:8000")
-    app.state.membership = MembershipManager(self_url)
-    # Seed peers from config
-    for p in config.peers:
-        app.state.membership.add_or_touch(p)
+    app.state.membership = MembershipManager(self_url, seeds=config.peers)
 
     @app.get("/health", tags=["system"])  # Simple health/hello endpoint
     async def health() -> dict[str, str]:  # noqa: D401 - short description fine
@@ -56,15 +53,26 @@ def create_app(config: NodeConfig | None = None) -> FastAPI:
     @app.get("/cluster/members", tags=["cluster"])
     async def cluster_members() -> dict[str, object]:
         membership: MembershipManager = app.state.membership
-        return {"members": membership.members()}
+        # Convert epoch seconds to ISO 8601 strings for readability
+        snapshot = membership.snapshot()
+        iso_map = {u: __import__("datetime").datetime.utcfromtimestamp(ts).isoformat() + "Z" for u, ts in snapshot.items()}
+        return {"members": membership.members(), "last_seen": iso_map}
 
     @app.post("/cluster/gossip", tags=["cluster"])
-    async def cluster_gossip(payload: dict[str, list[str]]) -> dict[str, object]:
-        """Receive gossip membership list and merge it."""
+    async def cluster_gossip(payload: dict[str, object]) -> dict[str, object]:
+        """Receive gossip membership snapshot.
+
+        Expected payload: {'members': {url: last_seen_ts, ...}, 'sender': 'http://host:port'}
+        We update our membership timestamps only if incoming ts is newer.
+        The sender is marked alive (its last_seen set to now).
+        """
         membership: MembershipManager = app.state.membership
-        incoming = payload.get("members", [])
-        membership.merge(incoming)
-        return {"known": membership.members()}
+        incoming_map = payload.get("members", {})  # type: ignore[assignment]
+        if not isinstance(incoming_map, dict):
+            incoming_map = {}
+        sender = payload.get("sender") if isinstance(payload.get("sender"), str) else None
+        membership.apply_snapshot(incoming_map, sender)
+        return {"known": membership.snapshot()}
 
     async def _gossip_loop() -> None:
         membership: MembershipManager = app.state.membership
@@ -78,10 +86,13 @@ def create_app(config: NodeConfig | None = None) -> FastAPI:
                     try:
                         await client.post(
                             f"{peer}/cluster/gossip",
-                            json={"members": membership.members()},
+                            json={
+                                "members": membership.snapshot(),
+                                "sender": membership.self_url,
+                            },
                         )
                     except Exception:
-                        # Ignore transient errors; peer may be down
+                        print("Couldn't find peer " + str(peer))
                         pass
                 await asyncio.sleep(interval)
 
