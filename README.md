@@ -68,10 +68,31 @@ Example with env vars directly:
 $env:QUEUE_NODE_ID=5; $env:QUEUE_PEERS="http://127.0.0.1:8000,http://127.0.0.1:8001"; uvicorn app.main:create_app_from_env --factory --port 8005 --reload
 ```
 
+## Gossip Membership Protocol
+
+Each node maintains an eventually consistent list of member URLs.
+
+Background loop (default every 2s):
+1. Prunes members not seen for 60s.
+2. Picks a random peer and POSTs its current membership to `/cluster/gossip`.
+3. Receiver merges the list, updating `last_seen`.
+
+Endpoints:
+- `GET /cluster/members` -> `{ "members": [ ... ] }`
+- `POST /cluster/gossip` body `{ "members": ["http://host:port", ...] }` returns `{ "known": [...] }`
+- `GET /cluster/info` now includes `members` array.
+
+Environment tuning:
+- `GOSSIP_INTERVAL` (seconds, default 2.0)
+- `GOSSIP_PRUNE_AGE` (seconds, default 60.0)
+
+To observe convergence locally, start 3 nodes with peers referencing at least one existing node; over time `members` will include all URLs.
+
 ## Next Steps (for distributed queue)
 - Define queue item model & persistence (in-memory first)
 - Add enqueue/dequeue endpoints
-- Implement node registration & discovery (heartbeat or gossip)
+- Refine membership propagation (push/pull, version vectors)
+- Implement node health checks / failure detection
 - Add replication / consistency strategy
 - Introduce background workers for processing
 

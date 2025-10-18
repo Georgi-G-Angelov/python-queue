@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
-from app.main import create_app, build_config
+from app.main import create_app
+from app.config import build_config
 
 
 def test_cluster_info_default():

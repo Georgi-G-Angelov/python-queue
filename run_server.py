@@ -41,6 +41,8 @@ def main() -> None:
             os.environ["QUEUE_PEERS"] = ",".join(args.peers)
         else:
             os.environ.pop("QUEUE_PEERS", None)
+        # Self URL used by gossip manager
+        os.environ["QUEUE_SELF_URL"] = f"http://{args.host}:{args.port}"
         # Run referencing the factory function import string.
         uvicorn.run(
             "app.main:create_app_from_env",
@@ -53,6 +55,8 @@ def main() -> None:
     else:
         cfg = build_config(node_id=args.node_id, peers=args.peers)
         app = create_app(cfg)
+        # Attach self_url attribute on state for non-reload construction
+        app.state.self_url = f"http://{args.host}:{args.port}"
         uvicorn.run(app, host=args.host, port=args.port, reload=False, lifespan="on")
 
 
