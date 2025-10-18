@@ -3,6 +3,7 @@ from app.main import app
 
 client = TestClient(app)
 
+
 def test_health():
     resp = client.get("/health")
     assert resp.status_code == 200
@@ -14,4 +15,7 @@ def test_health():
 def test_root():
     resp = client.get("/")
     assert resp.status_code == 200
-    assert resp.json()["service"] == "python-queue"
+    data = resp.json()
+    assert data["service"] == "python-queue"
+    assert data["node_id"] == 0
+    assert data["peers"] == []
