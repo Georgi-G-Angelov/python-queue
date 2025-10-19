@@ -108,3 +108,19 @@ class PartitionRing:
             return []
         # Collect partitions where owner matches norm
         return [p for p, owner in self._partition_owner.items() if owner == norm]
+
+    def moved_partitions_after_change(self, old_ring: 'PartitionRing') -> List[int]:
+        """Return list of partition indices whose owner changed compared to old_ring.
+
+        Both rings must cover the same NUM_SERVER_PARTITIONS. Partitions are considered moved if
+        the owning node differs (string comparison after normalization performed in rings). The
+        result list is sorted ascending.
+        """
+        moved: List[int] = []
+        # Fast path: if old_ring has identical owner mapping reference-wise (rare) return empty
+        if old_ring is self:
+            return moved
+        for p in range(NUM_SERVER_PARTITIONS):
+            if self._partition_owner.get(p) != old_ring._partition_owner.get(p):
+                moved.append(p)
+        return moved
