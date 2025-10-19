@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from app.messaging.storage import QueueStorage
 from app.messaging import Message
+from app.messaging.constants import MESSAGES_PER_SEGMENT
 
 
 def test_write_message_creates_structure(tmp_path, monkeypatch):
@@ -49,9 +50,11 @@ def test_descriptor_increments_and_segment_rolls(tmp_path, monkeypatch):
     QueueStorage.reset_for_tests()
     qs = QueueStorage(9)
 
-    # Write 105 messages to force rollover: messages 1..100 in file 0, 101..105 in file 1
+    # Write MESSAGES_PER_SEGMENT + 5 messages to force rollover: first segment full, remainder in next
     last_msg = None
-    for i in range(105):
+    extra = 5
+    total = MESSAGES_PER_SEGMENT + extra
+    for i in range(total):
         m = Message(topic="beta", value=i, key="3")
         last_msg = m
         qs.write_message(m)
@@ -60,7 +63,7 @@ def test_descriptor_increments_and_segment_rolls(tmp_path, monkeypatch):
     topic_dir = Path(str(partition)) / last_msg.topic
     descriptor = topic_dir / "descriptor.txt"
     assert descriptor.exists()
-    assert descriptor.read_text(encoding="utf-8").strip() == "105"
+    assert descriptor.read_text(encoding="utf-8").strip() == str(total)
 
     seg0 = topic_dir / "0"
     seg1 = topic_dir / "1"
@@ -68,8 +71,8 @@ def test_descriptor_increments_and_segment_rolls(tmp_path, monkeypatch):
 
     seg0_lines = seg0.read_text(encoding="utf-8").strip().splitlines()
     seg1_lines = seg1.read_text(encoding="utf-8").strip().splitlines()
-    assert len(seg0_lines) == 100
-    assert len(seg1_lines) == 5
+    assert len(seg0_lines) == MESSAGES_PER_SEGMENT
+    assert len(seg1_lines) == extra
 
     # Ensure each line parses as JSON
     import json
@@ -99,15 +102,15 @@ def test_corrupt_descriptor_ignored_during_runtime(tmp_path, monkeypatch):
 
     # Descriptor now overwritten with count 2
     assert descriptor.read_text(encoding="utf-8").strip() == "2"
-    assert path_first == path_second  # still segment 0 (under 100 messages)
+    assert path_first == path_second  # still segment 0 (under MESSAGES_PER_SEGMENT messages)
 
 
 def test_multiple_segments_created(tmp_path, monkeypatch):
-    """Write more than 200 messages to ensure multiple segment files are created.
+    """Write more than 2 * MESSAGES_PER_SEGMENT messages to ensure multiple segment files are created.
 
-    For 250 messages we expect:
-    - descriptor.txt contains 250
-    - segment files: 0 (messages 1-100), 1 (101-200), 2 (201-250 with 50 lines)
+    For (2 * MESSAGES_PER_SEGMENT + 50) messages we expect:
+    - descriptor.txt contains total
+    - segment files: 0 (first MESSAGES_PER_SEGMENT), 1 (second MESSAGES_PER_SEGMENT), 2 (remaining 50 lines)
     """
     monkeypatch.chdir(tmp_path)
     QueueStorage.reset_for_tests()
@@ -115,7 +118,9 @@ def test_multiple_segments_created(tmp_path, monkeypatch):
 
     topic = "delta"
     key = "7"
-    messages = [Message(topic=topic, value=i, key=key) for i in range(250)]
+    remainder = 50
+    total_messages = 2 * MESSAGES_PER_SEGMENT + remainder
+    messages = [Message(topic=topic, value=i, key=key) for i in range(total_messages)]
     for m in messages:
         qs.write_message(m)
 
@@ -123,7 +128,7 @@ def test_multiple_segments_created(tmp_path, monkeypatch):
     topic_dir = Path(str(partition)) / topic
     descriptor = topic_dir / "descriptor.txt"
     assert descriptor.exists()
-    assert descriptor.read_text(encoding="utf-8").strip() == "250"
+    assert descriptor.read_text(encoding="utf-8").strip() == str(total_messages)
 
     seg0 = topic_dir / "0"
     seg1 = topic_dir / "1"
@@ -134,9 +139,9 @@ def test_multiple_segments_created(tmp_path, monkeypatch):
     seg1_lines = seg1.read_text(encoding="utf-8").strip().splitlines()
     seg2_lines = seg2.read_text(encoding="utf-8").strip().splitlines()
 
-    assert len(seg0_lines) == 100
-    assert len(seg1_lines) == 100
-    assert len(seg2_lines) == 50
+    assert len(seg0_lines) == MESSAGES_PER_SEGMENT
+    assert len(seg1_lines) == MESSAGES_PER_SEGMENT
+    assert len(seg2_lines) == remainder
 
     import json
     # Quick integrity check: all lines parse and belong to same topic

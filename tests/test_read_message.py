@@ -1,5 +1,6 @@
 from app.messaging.storage import QueueStorage
 from app.messaging import Message
+from app.messaging.constants import MESSAGES_PER_SEGMENT
 from pathlib import Path
 import os
 
@@ -72,18 +73,20 @@ def test_read_message_segment_boundary(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     qs = setup_storage(tmp_path, node=4)
 
-    # Write 105 messages to test segment rollover reading
-    msgs = [Message(topic="tseg", value=i, key="5") for i in range(105)]
+    # Write MESSAGES_PER_SEGMENT + 5 messages to test segment rollover reading
+    extra = 5
+    total = MESSAGES_PER_SEGMENT + extra
+    msgs = [Message(topic="tseg", value=i, key="5") for i in range(total)]
     for m in msgs:
         qs.write_message(m)
     partition = msgs[0].server_partition()
 
-    # Read first 100 (segment 0)
-    for i in range(100):
+    # Read first MESSAGES_PER_SEGMENT (segment 0)
+    for i in range(MESSAGES_PER_SEGMENT):
         msg = qs.read_message(partition, "tseg", consumer_group="cg")
         assert msg is not None and msg.value == i
     # Next messages in segment 1
-    for i in range(100, 105):
+    for i in range(MESSAGES_PER_SEGMENT, total):
         msg = qs.read_message(partition, "tseg", consumer_group="cg")
         assert msg is not None and msg.value == i
     # Exhausted

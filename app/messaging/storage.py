@@ -5,6 +5,7 @@ import threading
 from pathlib import Path
 from typing import Optional, Dict
 from .message import Message
+from .constants import MESSAGES_PER_SEGMENT
 
 
 class QueueStorage:
@@ -59,18 +60,27 @@ class QueueStorage:
             cls._instance = None
 
     def write_message(self, message: Message) -> Path:
-        """Persist a message to disk using partition/topic segmentation.
+        """Persist a message to disk using partition/topic segmentation (append-then-descriptor update).
 
         Layout (relative to node base dir / CWD after init):
-        <partition>/<topic>/descriptor.txt
-        <partition>/<topic>/<segment_file>
+          <partition>/<topic>/descriptor.txt
+          <partition>/<topic>/<segment_file>
 
-        descriptor.txt stores the TOTAL number of messages recorded for that (partition, topic); it is rewritten
-        on every append. We treat a non-integer descriptor as corruption and reset count to 0 before incrementing.
+        Atomicity model:
+          1. Determine segment from current count (pre-increment).
+          2. Append message line to segment file.
+          3. If append succeeds, increment in-memory count and rewrite descriptor.txt.
+          4. If append fails (exception), descriptor and in-memory count remain unchanged (rollback implicit).
 
-        Segment file naming: integer division by 100 groups messages into fixed-size buckets to keep file sizes
-        manageable and enable future compaction or indexing. (Messages 1..100 => segment '0', 101..200 => '1', etc.)
-        The current implementation appends newline-delimited JSON (NDJSON) without pretty formatting for space efficiency.
+        This ordering prevents descriptor.txt from advertising a message that was never fully appended if an error
+        occurs while writing the segment file. (Previous implementation incremented descriptor first and could drift.)
+
+        descriptor.txt stores the TOTAL number of successfully recorded messages for that (partition, topic); it is rewritten
+        on every successful append. A non-integer descriptor at initialization is treated as corruption -> count resets to 0.
+
+        Segment file naming: integer division by MESSAGES_PER_SEGMENT groups messages into fixed-size buckets to keep file sizes
+        manageable and enable future compaction or indexing. (Messages with zero-based index i go to segment i // MESSAGES_PER_SEGMENT.)
+        We append newline-delimited JSON (NDJSON) without pretty formatting for space efficiency.
 
         Returns the path to the segment file the message was written to.
         """
@@ -88,23 +98,24 @@ class QueueStorage:
             # Obtain or initialize topic state via helper
             state = self._get_or_init_topic_state(topic_key, topic_dir)
 
-            # Increment in-memory count then persist (overwrite file contents with new count)
-            # NOTE: We intentionally skip re-reading descriptor.txt each call for performance.
-            state["count"] += 1
-            num_messages = state["count"]
-            descriptor_file = state["descriptor"]
-            descriptor_file.seek(0)
-            descriptor_file.truncate(0)
-            descriptor_file.write(str(num_messages))
-            descriptor_file.flush()
-
-            # Segment file determined by integer division by 100
-            segment_index = (num_messages - 1) // 100
+            # Current count BEFORE writing new message
+            current_count = state["count"]
+            # Determine segment index based on zero-based message index (current_count)
+            segment_index = current_count // MESSAGES_PER_SEGMENT
             segment_file = topic_dir / f"{segment_index}"
 
+            # Attempt to append message first; if this fails we do NOT update descriptor/count.
             with segment_file.open("a", encoding="utf-8") as fh:
                 fh.write(message.to_json())
                 fh.write("\n")
+
+            # Append succeeded: update in-memory count and descriptor (descriptor reflects successful writes only)
+            state["count"] = current_count + 1
+            descriptor_file = state["descriptor"]
+            descriptor_file.seek(0)
+            descriptor_file.truncate(0)
+            descriptor_file.write(str(state["count"]))
+            descriptor_file.flush()
 
             return segment_file
         finally:
@@ -154,8 +165,8 @@ class QueueStorage:
                 return None  # nothing new
 
             # Determine segment and line index
-            segment_index = offset // 100
-            line_index = offset % 100
+            segment_index = offset // MESSAGES_PER_SEGMENT
+            line_index = offset % MESSAGES_PER_SEGMENT
             segment_file = topic_dir / f"{segment_index}"
             if not segment_file.exists():
                 # Unexpected missing file; treat as no message
