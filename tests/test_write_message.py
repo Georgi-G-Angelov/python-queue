@@ -99,3 +99,46 @@ def test_corrupt_descriptor_resets(tmp_path, monkeypatch):
     # After corruption we treat previous as 0 and now descriptor should be 1
     assert descriptor.read_text(encoding="utf-8").strip() == "1"
     assert path_first == path_second  # still segment 0
+
+
+def test_multiple_segments_created(tmp_path, monkeypatch):
+    """Write more than 200 messages to ensure multiple segment files are created.
+
+    For 250 messages we expect:
+    - descriptor.txt contains 250
+    - segment files: 0 (messages 1-100), 1 (101-200), 2 (201-250 with 50 lines)
+    """
+    monkeypatch.chdir(tmp_path)
+    QueueStorage.reset_for_tests()
+    qs = QueueStorage(13)
+
+    topic = "delta"
+    key = "7"
+    messages = [Message(topic=topic, value=i, key=key) for i in range(250)]
+    for m in messages:
+        qs.write_message(m)
+
+    partition = messages[0].server_partition()
+    topic_dir = Path(str(partition)) / topic
+    descriptor = topic_dir / "descriptor.txt"
+    assert descriptor.exists()
+    assert descriptor.read_text(encoding="utf-8").strip() == "250"
+
+    seg0 = topic_dir / "0"
+    seg1 = topic_dir / "1"
+    seg2 = topic_dir / "2"
+    assert seg0.exists() and seg1.exists() and seg2.exists()
+
+    seg0_lines = seg0.read_text(encoding="utf-8").strip().splitlines()
+    seg1_lines = seg1.read_text(encoding="utf-8").strip().splitlines()
+    seg2_lines = seg2.read_text(encoding="utf-8").strip().splitlines()
+
+    assert len(seg0_lines) == 100
+    assert len(seg1_lines) == 100
+    assert len(seg2_lines) == 50
+
+    import json
+    # Quick integrity check: all lines parse and belong to same topic
+    for line in seg2_lines:  # sample last segment
+        parsed = json.loads(line)
+        assert parsed["topic"] == topic
