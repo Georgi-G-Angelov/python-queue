@@ -7,7 +7,7 @@ from app.messaging.constants import NUM_SERVER_PARTITIONS
 VIRTUAL_REPLICAS = 10
 
 
-class HashRing:
+class PartitionRing:
     """Deterministic evenly spaced replica ring.
 
     We divide the partition index space [0, NUM_SERVER_PARTITIONS) into intervals using evenly spaced
@@ -23,7 +23,7 @@ class HashRing:
 
     def __init__(self, nodes: Sequence[str]):
         if not nodes:
-            raise ValueError("HashRing requires at least one node")
+            raise ValueError("PartitionRing requires at least one node")
         norm_nodes = [n.rstrip('/') for n in nodes]
         self._nodes = norm_nodes
         total_replicas = len(norm_nodes) * VIRTUAL_REPLICAS
@@ -41,7 +41,7 @@ class HashRing:
         # Tail implicitly belongs to last anchor if not aligned
         self._anchors = anchors
         # Precompute partition owners
-        self._partition_owner = {}
+        self._partition_owner: Dict[int, str] = {}
         anchor_indices = [a[0] for a in anchors]
         for i, (start, node) in enumerate(anchors):
             end = anchor_indices[i + 1] if i + 1 < len(anchor_indices) else NUM_SERVER_PARTITIONS
