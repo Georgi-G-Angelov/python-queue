@@ -78,7 +78,7 @@ def test_descriptor_increments_and_segment_rolls(tmp_path, monkeypatch):
         assert parsed["topic"] == "beta"
 
 
-def test_corrupt_descriptor_resets(tmp_path, monkeypatch):
+def test_corrupt_descriptor_ignored_during_runtime(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     QueueStorage.reset_for_tests()
     qs = QueueStorage(11)
@@ -90,15 +90,16 @@ def test_corrupt_descriptor_resets(tmp_path, monkeypatch):
     topic_dir = Path(str(partition)) / msg.topic
     descriptor = topic_dir / "descriptor.txt"
 
-    # Corrupt descriptor
+    # Corrupt descriptor on disk after first write
     descriptor.write_text("not-an-int", encoding="utf-8")
 
+    # Second write should ignore on-disk corruption (no re-read) and increment in-memory count to 2
     msg2 = Message(topic="gamma", value="second", key="2")
     path_second = qs.write_message(msg2)
 
-    # After corruption we treat previous as 0 and now descriptor should be 1
-    assert descriptor.read_text(encoding="utf-8").strip() == "1"
-    assert path_first == path_second  # still segment 0
+    # Descriptor now overwritten with count 2
+    assert descriptor.read_text(encoding="utf-8").strip() == "2"
+    assert path_first == path_second  # still segment 0 (under 100 messages)
 
 
 def test_multiple_segments_created(tmp_path, monkeypatch):
