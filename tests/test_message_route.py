@@ -17,7 +17,7 @@ def test_message_route_local_partition(monkeypatch):
     storage.write_message(msg)
     partition = msg.server_partition()
     # Read via route
-    resp = client.get("/message", params={"topic": "tloc", "key": "42", "consumer_group": "cg1"})
+    resp = client.get("/read_message", params={"topic": "tloc", "key": "42", "consumer_group": "cg1"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["partition"] == partition
@@ -30,7 +30,7 @@ def test_message_route_missing_fields():
     cfg = NodeConfig(node_id=6, peers=[])
     app = create_app(cfg)
     client = TestClient(app)
-    resp = client.get("/message", params={"topic": "a"})
+    resp = client.get("/read_message", params={"topic": "a"})
     # Missing required 'key' and 'consumer_group' query params -> FastAPI validation error 422
     assert resp.status_code == 422
 
@@ -63,7 +63,7 @@ def test_message_route_reroute(monkeypatch):
         return FakeResp()
     monkeypatch.setattr(httpx, "get", fake_get)
 
-    resp = client.get("/message", params={"topic": "x", "key": "y", "consumer_group": "cg"})
+    resp = client.get("/read_message", params={"topic": "x", "key": "y", "consumer_group": "cg"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["node"] == "http://other:8000"

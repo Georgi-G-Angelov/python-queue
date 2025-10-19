@@ -37,6 +37,7 @@ def create_app(config: NodeConfig | None = None) -> FastAPI:
     app.state.config = config
     # Initialize storage singleton for this node
     QueueStorage(config.node_id)
+
     # Determine self URL (priority: env var set by run_server.py, else http://127.0.0.1:port assumed later)
     self_url = os.getenv("QUEUE_SELF_URL", "http://127.0.0.1:8000")
     app.state.membership = MembershipManager(self_url, seeds=config.peers)
