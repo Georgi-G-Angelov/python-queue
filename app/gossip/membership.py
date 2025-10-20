@@ -26,6 +26,8 @@ class MembershipManager:
         self._members: Dict[str, Member] = {self.self_url: Member(self.self_url)}
         self._seeds: List[str] = []
         self._initial_gossip_done = False
+        # Track nodes whose addition-trigger migration has already been processed
+        self._seen_added_nodes: set[str] = set()
         if seeds:
             for s in seeds:
                 s_norm = s.rstrip('/')
@@ -38,6 +40,13 @@ class MembershipManager:
         return list(self._members.keys())
 
     def apply_snapshot(self, snapshot: Dict[str, float], sender: Optional[str]) -> None:
+        """Merge incoming snapshot and detect node additions.
+
+        If one or more new nodes are discovered (i.e. were absent in previous membership),
+        schedule an asynchronous migration task to backfill partitions that moved away
+        from this node due to ring rebalance. Only latest segment + state are migrated.
+        """
+        previous_members = set(self._members.keys())  # capture before merge
         now = time.time()
         for url, ts in snapshot.items():
             url_norm = url.rstrip('/')
@@ -57,6 +66,34 @@ class MembershipManager:
             else:
                 self._members[sender_norm] = Member(sender_norm)
                 self._members[sender_norm].last_seen = now
+        # Detect additions
+        new_members = set(self._members.keys())
+        added = new_members - previous_members
+        # Only trigger if there is at least one truly new node not processed before
+        truly_new = {a for a in added if a not in self._seen_added_nodes}
+        if truly_new:
+            self._seen_added_nodes.update(truly_new)
+            # Fire async migration task (best-effort). Import inside to avoid cycle.
+            try:
+                import asyncio
+                from fastapi import FastAPI
+                from app.distribution.data_migration import migrate_partitions_on_node_add
+                # Attempt to locate global FastAPI app via running tasks; we rely on caller attaching it via closure/state.
+                # Expect apply_snapshot invoked from an endpoint with 'app' available as sender context.
+                # We'll store a reference on self the first time we see one (caller should set self.app externally).
+                app: FastAPI | None = getattr(self, "_app_ref", None)  # type: ignore[attr-defined]
+                if app is not None:
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                    loop.create_task(
+                        migrate_partitions_on_node_add(app, list(previous_members), list(new_members))
+                    )
+            except Exception:
+                # Swallow errors: migration is best-effort
+                pass
 
     def candidate_peers(self) -> List[str]:
         return list(set(self._seeds) | {u for u in self._members if u != self.self_url})

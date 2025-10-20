@@ -7,9 +7,82 @@ from app.messaging.message import Message
 from app.messaging.storage import QueueStorage
 from app.gossip import MembershipManager
 from app.distribution.partition_ring import PartitionRing
+from typing import Dict, Tuple
+import threading
 
 
 def register_messaging_routes(app: FastAPI) -> None:
+    # Initialize owner cache and migration locks if not present
+    if not hasattr(app.state, "partition_owner_cache"):
+        app.state.partition_owner_cache = {}  # type: ignore[attr-defined]
+    if not hasattr(app.state, "migration_locks"):
+        app.state.migration_locks = {}  # type: ignore[attr-defined]
+
+    def _get_migration_lock(partition: int, topic: str) -> threading.Lock:
+        key = (partition, topic)
+        locks: Dict[Tuple[int, str], threading.Lock] = app.state.migration_locks  # type: ignore[attr-defined]
+        lock = locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            locks[key] = lock
+        return lock
+
+    def _maybe_migrate_partition(partition: int, topic: str, old_owner: str, new_owner: str) -> None:
+        """Backfill latest segment and state for a topic that moved to another owner.
+
+        Only migrates the single latest segment (if any) plus descriptor/offset files.
+        Executed under per (partition, topic) lock to avoid duplicate migrations.
+        """
+        lock = _get_migration_lock(partition, topic)
+        if not lock.acquire(blocking=False):
+            return  # migration in progress elsewhere
+        try:
+            storage = QueueStorage.get()
+            # Introspect topic state
+            segments = storage.list_segments(partition, topic)
+            descriptor_count, offsets = storage.get_descriptor_and_offsets(partition, topic)
+            import httpx
+            # Migrate all segments (full historical migration)
+            migrated_set: set = getattr(app.state, "_migrated_segments", set())  # type: ignore[attr-defined]
+            for seg_idx in segments:
+                migrated_flag = f"__migrated_segment_{partition}_{topic}_{seg_idx}"
+                if migrated_flag in migrated_set:
+                    continue
+                msgs = storage.read_segment_messages(partition, topic, seg_idx)
+                if msgs:
+                    seg_payload = {
+                        "topic": topic,
+                        "server_partition": partition,
+                        "segment_index": seg_idx,
+                        "messages": [{"key": m.key, "value": m.value} for m in msgs],
+                    }
+                    try:
+                        httpx.post(f"{new_owner}/backfill_segment", json=seg_payload, timeout=30.0)
+                    except Exception:
+                        pass
+                migrated_set.add(migrated_flag)
+            app.state._migrated_segments = migrated_set  # type: ignore[attr-defined]
+            # Backfill state (descriptor + offsets)
+            state_flag = f"__migrated_state_{partition}_{topic}"
+            migrated_state: set = getattr(app.state, "_migrated_states", set())  # type: ignore[attr-defined]
+            if state_flag not in migrated_state:
+                # Mark before network call to avoid race counting duplicates
+                migrated_state.add(state_flag)
+                app.state._migrated_states = migrated_state  # type: ignore[attr-defined]
+                state_payload = {
+                    "topic": topic,
+                    "server_partition": partition,
+                    "descriptor_count": descriptor_count,
+                    "consumer_offsets": offsets,
+                }
+                try:
+                    httpx.post(f"{new_owner}/backfill_state", json=state_payload, timeout=10.0)
+                except Exception:
+                    pass
+            else:
+                app.state._migrated_states = migrated_state  # ensure attribute persists
+        finally:
+            lock.release()
     @app.post("/post_message", tags=["messaging"])
     async def post_message(payload: dict = Body(...)) -> dict[str, object]:
         """Publish a message.
@@ -46,6 +119,21 @@ def register_messaging_routes(app: FastAPI) -> None:
         self_url = membership.self_url if hasattr(membership, "self_url") else nodes[0]
         owner = ring.node_for_partition(partition)
 
+        cache: Dict[int, str] = app.state.partition_owner_cache  # type: ignore[attr-defined]
+        previous_owner = cache.get(partition, self_url)
+        # Detect ownership change: cached owner was self but ring assigns different owner now
+        if previous_owner == self_url and owner != self_url:
+            # Migrate each topic under this partition (latest segment only)
+            storage = QueueStorage.get()
+            for t in storage.list_topics(partition):
+                d_count, _ = storage.get_descriptor_and_offsets(partition, t)
+                latest_seg = storage.latest_segment_index(partition, t)
+                if d_count == 0 and latest_seg is None:
+                    continue  # skip empty topic directories
+                _maybe_migrate_partition(partition, t, previous_owner, owner)
+        # Update cache after potential migration
+        cache[partition] = owner
+
         if owner == self_url:
             storage = QueueStorage.get()
             storage.write_message(msg)
@@ -60,6 +148,7 @@ def register_messaging_routes(app: FastAPI) -> None:
             raise HTTPException(status_code=resp.status_code, detail=f"Upstream error from {owner}: {resp.text}")
         upstream = resp.json()
         return upstream
+
     @app.get("/read_message", tags=["messaging"])
     async def get_message(
         topic: str = Query(...),

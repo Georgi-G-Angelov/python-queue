@@ -268,6 +268,94 @@ class QueueStorage:
         finally:
             lock.release()
 
+    # Introspection helpers for migration/backfill
+    def list_topics(self, partition: int) -> list[str]:
+        part_dir = self._partition_dirs.get(partition)
+        if part_dir is None:
+            part_dir = Path(str(partition))
+            if not part_dir.exists():
+                return []
+        topics = []
+        for child in part_dir.iterdir():
+            if child.is_dir():
+                topics.append(child.name)
+        return topics
+
+    def list_segments(self, partition: int, topic: str) -> list[int]:
+        topic_dir = self._topic_dirs.get((partition, topic))
+        if topic_dir is None:
+            topic_dir = Path(str(partition)) / topic
+            if not topic_dir.exists():
+                return []
+        indices = []
+        for child in topic_dir.iterdir():
+            if child.is_file() and child.name.isdigit():
+                try:
+                    indices.append(int(child.name))
+                except ValueError:
+                    continue
+        return sorted(indices)
+
+    def latest_segment_index(self, partition: int, topic: str) -> Optional[int]:
+        topic_dir = self._topic_dirs.get((partition, topic))
+        if topic_dir is None:
+            topic_dir = Path(str(partition)) / topic
+            if not topic_dir.exists():
+                return None
+        max_idx: Optional[int] = None
+        for child in topic_dir.iterdir():
+            if child.is_file() and child.name.isdigit():
+                idx = int(child.name)
+                if max_idx is None or idx > max_idx:
+                    max_idx = idx
+        return max_idx
+
+    def read_segment_messages(self, partition: int, topic: str, segment_index: int) -> list[Message]:
+        topic_dir = self._topic_dirs.get((partition, topic))
+        if topic_dir is None:
+            topic_dir = Path(str(partition)) / topic
+            if not topic_dir.exists():
+                return []
+        segment_file = topic_dir / str(segment_index)
+        if not segment_file.exists():
+            return []
+        msgs: list[Message] = []
+        for line in segment_file.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                msgs.append(Message.from_json(line))
+            except Exception:
+                # Skip corrupted lines
+                continue
+        return msgs
+
+    def get_descriptor_and_offsets(self, partition: int, topic: str) -> tuple[int, Dict[str, int]]:
+        topic_dir = self._topic_dirs.get((partition, topic))
+        if topic_dir is None:
+            topic_dir = Path(str(partition)) / topic
+            if not topic_dir.exists():
+                return 0, {}
+        descriptor_path = topic_dir / "descriptor.txt"
+        if descriptor_path.exists():
+            try:
+                raw = descriptor_path.read_text(encoding="utf-8").strip()
+                descriptor_count = int(raw) if raw else 0
+            except ValueError:
+                descriptor_count = 0
+        else:
+            descriptor_count = 0
+        offsets: Dict[str, int] = {}
+        for child in topic_dir.iterdir():
+            if child.is_file() and child.name.startswith("consumer_group_"):
+                cg = child.name[len("consumer_group_"):]
+                try:
+                    raw = child.read_text(encoding="utf-8").strip()
+                    offsets[cg] = int(raw) if raw else 0
+                except ValueError:
+                    offsets[cg] = 0
+        return descriptor_count, offsets
+
     def close_all(self) -> None:
         """Close all open descriptor file handles (useful for shutdown/tests)."""
         for state in self._topic_state.values():
