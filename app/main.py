@@ -37,6 +37,8 @@ def create_app(config: NodeConfig | None = None) -> FastAPI:
     app.state.config = config
     # Initialize storage singleton for this node
     QueueStorage(config.node_id)
+    # print(config.node_id)
+
 
     # Determine self URL (priority: env var set by run_server.py, else http://127.0.0.1:port assumed later)
     self_url = os.getenv("QUEUE_SELF_URL", "http://127.0.0.1:8000")
@@ -51,5 +53,5 @@ def create_app(config: NodeConfig | None = None) -> FastAPI:
 def create_app_from_env() -> FastAPI:
     return create_app(load_config_from_env())
 
-# Default app instance for ASGI auto-discovery (uvicorn app.main:app)
-app = create_app()
+# Note: Removed module-level app instance to prevent premature initialization under uvicorn reload.
+# Use factory style: uvicorn app.main:create_app_from_env --factory

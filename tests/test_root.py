@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
-from app.main import app
+from app.main import create_app
 
-client = TestClient(app)
+client = TestClient(create_app())
 
 
 def test_health():
@@ -17,5 +17,5 @@ def test_root():
     assert resp.status_code == 200
     data = resp.json()
     assert data["service"] == "python-queue"
-    assert data["node_id"] == 0
+    assert data["node_id"] == 0  # default when no config provided
     assert data["peers"] == []

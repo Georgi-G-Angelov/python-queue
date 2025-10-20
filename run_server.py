@@ -37,6 +37,7 @@ def main() -> None:
         # For reload to work, uvicorn requires an import string, not a constructed instance.
         # We'll set env vars that create_app_from_env() will read.
         os.environ["QUEUE_NODE_ID"] = str(args.node_id)
+        # print(args.node_id)
         if args.peers:
             os.environ["QUEUE_PEERS"] = ",".join(args.peers)
         else:
@@ -54,6 +55,7 @@ def main() -> None:
         )
     else:
         cfg = build_config(node_id=args.node_id, peers=args.peers)
+        # print(args.node_id)
         app = create_app(cfg)
         # Attach self_url attribute on state for non-reload construction
         app.state.self_url = f"http://{args.host}:{args.port}"
