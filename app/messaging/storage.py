@@ -121,6 +121,50 @@ class QueueStorage:
         finally:
             lock.release()
 
+    def write_message_at_segment(self, message: Message, segment_index: int) -> Path:
+        """Persist a message to a specific segment file instead of computing segment from count.
+
+        Use cases: backfilling, replay import, or deterministic replay where caller already batched messages
+        by segment. This method still ensures descriptor consistency and locking.
+
+        Rules / Validation:
+          - segment_index must be >= 0.
+          - Writes always append; if chosen segment is 'behind' current progression (i.e. segment_index < current_count // MESSAGES_PER_SEGMENT)
+            we still append to the specified segment (allowing retroactive insertion) but descriptor will increase and may create a hole.
+          - It is caller's responsibility to avoid creating semantic ordering gaps; consumer offset reading remains sequential by message index,
+            so retroactive insertion in an earlier segment after later segments exist will not be visible to consumers that already passed that offset.
+
+        Returns the path to the segment file used.
+        """
+        if segment_index < 0:
+            raise ValueError("segment_index must be non-negative")
+        partition = message.server_partition()
+        topic_key = (partition, message.topic)
+        lock = self._get_topic_lock(topic_key)
+        lock.acquire()
+        try:
+            part_dir = self._ensure_partition_dir(partition)
+            topic_dir = self._ensure_topic_dir(part_dir, topic_key, message.topic)
+            state = self._get_or_init_topic_state(topic_key, topic_dir)
+
+            current_count = state["count"]
+            segment_file = topic_dir / f"{segment_index}"
+
+            with segment_file.open("a", encoding="utf-8") as fh:
+                fh.write(message.to_json())
+                fh.write("\n")
+
+            # After append update count and descriptor (we consider message appended at new sequential index current_count)
+            state["count"] = current_count + 1
+            descriptor_file = state["descriptor"]
+            descriptor_file.seek(0)
+            descriptor_file.truncate(0)
+            descriptor_file.write(str(state["count"]))
+            descriptor_file.flush()
+            return segment_file
+        finally:
+            lock.release()
+
     def read_message(self, partition: int, topic: str, consumer_group: str) -> Optional[Message]:
         """Return the next message for a consumer group in a partition/topic or None if exhausted.
 
@@ -189,6 +233,38 @@ class QueueStorage:
             cg_file.write_text(str(new_offset), encoding="utf-8")
 
             return msg
+        finally:
+            lock.release()
+
+    def set_topic_state(self, partition: int, topic: str, descriptor_count: int, consumer_offsets: Dict[str, int]) -> None:
+        """Backfill descriptor count and consumer group offset files for a (partition, topic).
+
+        This does NOT create or validate segment files; caller must ensure segment files already exist that
+        correspond to descriptor_count messages. Offsets greater than descriptor_count are clamped to descriptor_count.
+        """
+        if descriptor_count < 0:
+            raise ValueError("descriptor_count must be non-negative")
+        topic_key = (partition, topic)
+        lock = self._get_topic_lock(topic_key)
+        lock.acquire()
+        try:
+            part_dir = self._ensure_partition_dir(partition)
+            topic_dir = self._ensure_topic_dir(part_dir, topic_key, topic)
+            state = self._get_or_init_topic_state(topic_key, topic_dir)
+
+            # Update descriptor count in-memory and file
+            state["count"] = descriptor_count
+            descriptor_file = state["descriptor"]
+            descriptor_file.seek(0)
+            descriptor_file.truncate(0)
+            descriptor_file.write(str(descriptor_count))
+            descriptor_file.flush()
+
+            # Write consumer offsets
+            for cg, off in consumer_offsets.items():
+                safe_off = off if off <= descriptor_count else descriptor_count
+                cg_file = topic_dir / f"consumer_group_{cg}"
+                cg_file.write_text(str(safe_off), encoding="utf-8")
         finally:
             lock.release()
 

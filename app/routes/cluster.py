@@ -6,12 +6,14 @@ from app.config import NodeConfig
 from app.gossip import MembershipManager
 from .node import register_node_routes
 from .messaging import register_messaging_routes
+from .backfill import register_backfill_routes
 
 
 def register_routes(app: FastAPI) -> None:
     # Include node-specific routes
     register_node_routes(app)
     register_messaging_routes(app)
+    register_backfill_routes(app)
     @app.get("/health", tags=["system"])
     async def health() -> dict[str, str]:
         return {"status": "ok", "message": "hello world"}
